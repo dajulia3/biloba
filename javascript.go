@@ -6,8 +6,7 @@ import (
 	"strings"
 	"sync/atomic"
 
-	"github.com/chromedp/cdproto/runtime"
-	"github.com/chromedp/chromedp"
+	"github.com/onsi/biloba/engine"
 	"github.com/onsi/gomega/gcustom"
 )
 
@@ -56,15 +55,7 @@ func (b *Biloba) RunErr(script string, args ...any) (any, error) {
 
 func (b *Biloba) runErr(script string, awaitPromise bool, args ...any) (any, error) {
 	b.blockIfNecessaryToEnsureSuccessfulDownloads()
-	var encodedResult []byte
-	options := func(p *runtime.EvaluateParams) *runtime.EvaluateParams {
-		p = p.WithUserGesture(true)
-		if awaitPromise {
-			p = p.WithAwaitPromise(true)
-		}
-		return p
-	}
-	err := chromedp.Run(b.Context, chromedp.EvaluateAsDevTools(script, &encodedResult, options))
+	encodedResult, err := engine.EvaluateRawContext(b.Context, script, awaitPromise)
 	if err != nil {
 		if strings.Contains(err.Error(), "_biloba is not defined") {
 			b.reloadBiloba()
@@ -88,7 +79,6 @@ func (b *Biloba) runErr(script string, awaitPromise bool, args ...any) (any, err
 	if len(encodedResult) == 0 {
 		return nil, fmt.Errorf("the script returned undefined, so there is nothing to decode into the pointer you provided.\nIf this script runs purely for its side effects, omit the decode target (or pass nil).\nOtherwise make sure the script returns a JSON-serializable value (e.g. `return true`).")
 	}
-
 	err = json.Unmarshal(encodedResult, args[0])
 	return args[0], err
 }

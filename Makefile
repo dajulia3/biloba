@@ -5,7 +5,7 @@
 
 GINKGO := go run github.com/onsi/ginkgo/v2/ginkgo
 
-.PHONY: test test-all stress-test update-chrome
+.PHONY: test test-all stress-test update-chrome driver-test driver-parity
 
 ## test: standard headless (chrome-headless-shell) suite - parallel + randomized. Your default.
 test:
@@ -16,6 +16,19 @@ test:
 test-all:
 	$(GINKGO) -r -p --randomize-all
 	BILOBA_TEST_HIGH_FIDELITY=true $(GINKGO) -r -p --randomize-all
+
+## driver-test: generated protocol drift, Go driver packages, and TypeScript unit coverage.
+driver-test:
+	go generate ./engine
+	cd typescript && pnpm check:protocol && pnpm test && pnpm typecheck && pnpm build
+	$(GINKGO) --randomize-all ./engine ./protocol ./cmd/bilobad
+
+## driver-parity: run the shared Go/TypeScript behavior contract against the same fixture.
+driver-parity:
+	mkdir -p .bin
+	go build -o .bin/bilobad ./cmd/bilobad
+	$(GINKGO) --randomize-all --focus="TypeScript driver parity contract" .
+	cd typescript && BILOBA_DAEMON_EXECUTABLE="$(CURDIR)/.bin/bilobad" pnpm test:parity
 
 ## update-chrome: pull the latest stable chrome-headless-shell into the puppeteer cache Biloba
 ## searches first (~/.cache/puppeteer), so `make test` exercises the same Chrome CI auto-installs.

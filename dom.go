@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"strings"
 
+	"github.com/onsi/biloba/engine"
 	"github.com/onsi/gomega"
 	"github.com/onsi/gomega/gcustom"
 	"github.com/onsi/gomega/types"
@@ -62,11 +63,14 @@ func (b *Biloba) runBilobaHandler(name string, selector any, args ...any) *bilob
 		result.Err = err.Error()
 		return result
 	}
-	parameters := []any{encoded}
-	parameters = append(parameters, args...)
-	_, err = b.RunErr(b.JSFunc("_biloba."+name).Invoke(parameters...), result)
+	engineResult, err := engine.RunHandlerContext(b.Context, name, encoded, args...)
 	if err != nil {
 		result.Err = err.Error()
+	} else {
+		result.Success = engineResult.Success
+		result.Err = engineResult.Err
+		result.Result = engineResult.Result
+		result.Found = engineResult.Found
 	}
 	if result.Found != nil {
 		// one lock + a few comparisons per DOM op, and only when trajectory recording is on

@@ -1,0 +1,158 @@
+syntax = "proto3";
+
+package biloba.v1;
+
+option go_package = "github.com/onsi/biloba/protocol/internal/bilobav1;bilobav1";
+
+service BilobaDriver {
+  rpc Handshake(HandshakeRequest) returns (HandshakeResponse);
+  rpc OpenSession(OpenSessionRequest) returns (OpenSessionResponse);
+  rpc PrepareSession(PrepareSessionRequest) returns (Empty);
+  rpc CloseSession(CloseSessionRequest) returns (Empty);
+  rpc Navigate(NavigateRequest) returns (OperationResult);
+  rpc SetCookies(SetCookiesRequest) returns (OperationResult);
+  rpc Click(ClickRequest) returns (OperationResult);
+  rpc SetValue(SetValueRequest) returns (OperationResult);
+  rpc Evaluate(EvaluateRequest) returns (OperationResult);
+  rpc Assert(AssertRequest) returns (OperationResult);
+}
+
+message HandshakeRequest { string protocol_version = 1; }
+message Empty {}
+
+message HandshakeResponse {
+  string protocol_version = 1;
+  repeated string capabilities = 2;
+}
+
+message OpenSessionRequest {}
+message OpenSessionResponse { string session_id = 1; }
+message PrepareSessionRequest { string session_id = 1; }
+message CloseSessionRequest { string session_id = 1; }
+
+enum LocatorKind {
+  LOCATOR_KIND_UNSPECIFIED = 0;
+  CSS = 1;
+  TEST_ID = 2;
+  TEXT = 3;
+  ROLE = 4;
+}
+
+enum MatchMode {
+  MATCH_MODE_UNSPECIFIED = 0;
+  EXACT = 1;
+  CONTAINS = 2;
+}
+
+message Locator {
+  LocatorKind kind = 1;
+  string value = 2;
+  string role = 3;
+  string name = 4;
+  MatchMode match = 5;
+  bool first = 6;
+}
+
+message PollPolicy {
+  int64 timeout_ms = 1;
+  int64 interval_ms = 2;
+}
+
+message Cookie {
+  string name = 1;
+  string value = 2;
+  string domain = 3;
+  string path = 4;
+  bool secure = 5;
+  bool http_only = 6;
+  double expires_unix = 7;
+  string same_site = 8;
+}
+
+message NavigateRequest {
+  string session_id = 1;
+  string url = 2;
+}
+
+message SetCookiesRequest {
+  string session_id = 1;
+  repeated Cookie cookies = 2;
+}
+
+message ClickRequest {
+  string session_id = 1;
+  Locator locator = 2;
+  PollPolicy poll = 3;
+}
+
+message SetValueRequest {
+  string session_id = 1;
+  Locator locator = 2;
+  string value_json = 3;
+  PollPolicy poll = 4;
+}
+
+message EvaluateRequest {
+  string session_id = 1;
+  string expression = 2;
+  string arguments_json = 3;
+}
+
+message Assertion {
+  enum Kind {
+    KIND_UNSPECIFIED = 0;
+    VISIBLE = 1;
+    TEXT = 2;
+    COUNT = 3;
+    ATTRIBUTE = 4;
+    VALUE = 5;
+    URL = 6;
+    EVALUATE = 7;
+  }
+
+  Kind kind = 1;
+  Locator locator = 2;
+  string attribute = 3;
+  string expression = 4;
+  string expected_string = 5;
+  int64 expected_count = 6;
+  string expected_json = 7;
+  MatchMode match = 8;
+}
+
+message AssertRequest {
+  string session_id = 1;
+  Assertion assertion = 2;
+  PollPolicy poll = 3;
+}
+
+message PollObservation {
+  uint32 attempt = 1;
+  int64 elapsed_ms = 2;
+  string observed_json = 3;
+  string retry_reason = 4;
+}
+
+message Timings {
+  int64 started_unix_ms = 1;
+  int64 elapsed_ms = 2;
+}
+
+message Diagnostics {
+  string locator = 1;
+  string expected = 2;
+  string dom_outline = 3;
+  string screenshot_path = 4;
+  string daemon_detail = 5;
+}
+
+message OperationResult {
+  bool matched = 1;
+  string observed_json = 2;
+  uint32 attempt_count = 3;
+  repeated PollObservation trajectory = 4;
+  Timings timings = 5;
+  Diagnostics diagnostics = 6;
+  uint32 rpc_request_count = 7;
+  uint32 rpc_response_count = 8;
+}

@@ -1,0 +1,36 @@
+{
+  "name": "@onsi/biloba-vitest-prototype",
+  "version": "0.0.0-private",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "protocol"
+  ],
+  "scripts": {
+    "generate:protocol": "rm -rf src/generated && mkdir -p src/generated protocol && proto-loader-gen-types --grpcLib=@grpc/grpc-js --outDir=src/generated ../protocol/biloba/v1/driver.proto && cp ../protocol/biloba/v1/driver.proto protocol/driver.proto",
+    "check:protocol": "pnpm generate:protocol && git diff --exit-code -- src/generated protocol",
+    "build": "tsc -p tsconfig.build.json",
+    "test": "vitest run",
+    "test:parity": "vitest run test/parity.test.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@grpc/grpc-js": "1.13.4",
+    "@grpc/proto-loader": "0.7.15"
+  },
+  "devDependencies": {
+    "@types/node": "22.15.30",
+    "typescript": "5.8.3",
+    "vitest": "3.2.4"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
