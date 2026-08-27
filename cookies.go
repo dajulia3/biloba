@@ -1,13 +1,8 @@
 package biloba
 
 import (
-	"context"
 	"time"
 
-	"github.com/chromedp/cdproto/cdp"
-	"github.com/chromedp/cdproto/network"
-	"github.com/chromedp/cdproto/storage"
-	"github.com/chromedp/chromedp"
 	"github.com/onsi/biloba/engine"
 )
 
@@ -127,32 +122,24 @@ Read https://onsi.github.io/biloba/#cookies-and-storage to learn more about cook
 func (b *Biloba) GetCookies() Cookies {
 	b.gt.Helper()
 	b.guardConfig("GetCookies")
-	var networkCookies []*network.Cookie
-	err := b.runWithBrowserExecutor(func(ctx context.Context) error {
-		var err error
-		networkCookies, err = storage.GetCookies().WithBrowserContextID(b.browserContextID).Do(ctx)
-		return err
-	})
+	engineCookies, err := engine.GetCookiesContext(b.Context, b.browserContextID)
 	if err != nil {
 		b.gt.Fatalf("Failed to get cookies:\n%s", err.Error())
 		return nil
 	}
-	cookies := make(Cookies, len(networkCookies))
-	for i, c := range networkCookies {
-		cookie := Cookie{
+	cookies := make(Cookies, len(engineCookies))
+	for i, c := range engineCookies {
+		cookies[i] = Cookie{
 			Name:     c.Name,
 			Value:    c.Value,
 			Domain:   c.Domain,
 			Path:     c.Path,
+			Expires:  c.Expires,
 			Secure:   c.Secure,
 			HTTPOnly: c.HTTPOnly,
-			SameSite: string(c.SameSite),
+			SameSite: c.SameSite,
 			Session:  c.Session,
 		}
-		if !c.Session && c.Expires > 0 {
-			cookie.Expires = time.Unix(int64(c.Expires), 0)
-		}
-		cookies[i] = cookie
 	}
 	return cookies
 }
@@ -187,14 +174,4 @@ func (b *Biloba) resetBrowsingState() {
 	_ = engine.ClearCookiesContext(b.Context, b.browserContextID)
 	b.RunErr(`try { window.localStorage.clear(); window.sessionStorage.clear(); } catch (e) {}`)
 	b.clearLeakedColorSchemeEmulation()
-}
-
-// runWithBrowserExecutor runs f against the browser-level CDP executor (as opposed to the
-// target/tab executor). The storage cookie commands are browser-scoped and take a
-// BrowserContextID, so they must be dispatched on the Browser connection.
-func (b *Biloba) runWithBrowserExecutor(f func(ctx context.Context) error) error {
-	return chromedp.Run(b.Context, chromedp.ActionFunc(func(ctx context.Context) error {
-		c := chromedp.FromContext(ctx)
-		return f(cdp.WithExecutor(ctx, c.Browser))
-	}))
 }
