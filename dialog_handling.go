@@ -2,7 +2,7 @@ package biloba
 
 import (
 	"github.com/chromedp/cdproto/page"
-	"github.com/chromedp/chromedp"
+	"github.com/onsi/biloba/engine"
 	"github.com/onsi/gomega/types"
 )
 
@@ -171,7 +171,7 @@ func (b *Biloba) handleEventJavascriptDialogOpening(ev *page.EventJavascriptDial
 		if text != "" {
 			action = action.WithPromptText(text)
 		}
-		chromedp.Run(b.Context, action)
+		engine.RunActionContext(b.Context, action)
 	}()
 }
 
