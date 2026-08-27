@@ -144,10 +144,6 @@ func (b *Biloba) captureScreenshot() []byte {
 	return img
 }
 
-// capturePageAction captures the whole document as a PNG, and optionally reports the document's width
-// in CSS pixels (which is what the visual-regression path divides by to recover the device scale
-// factor).  Both come out of the same round trip, so they describe the same layout.
-//
 /*
 CaptureImgCatScreenshot() returns a full screenshot of the current tab as an iTerm2 imgcat-compatible string.  Simply print it out to see images on your terminal.
 
