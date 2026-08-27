@@ -4,11 +4,9 @@ import (
 	"context"
 	"errors"
 	"net/http"
-	"strings"
 	"time"
 
-	"github.com/chromedp/cdproto/network"
-	"github.com/chromedp/chromedp"
+	"github.com/onsi/biloba/engine"
 	"github.com/onsi/gomega/gcustom"
 )
 
@@ -60,35 +58,26 @@ func (b *Biloba) NavigateWithStatus(url string, status int) *Biloba {
 func (b *Biloba) navigateWithStatus(url string, status int) *Biloba {
 	b.gt.Helper()
 
-	// Chrome 149+ fires Network.loadingFailed (ERR_HTTP_RESPONSE_CODE_FAILURE) for 4xx/5xx
-	// responses, causing chromedp.Navigate to return an error instead of a success.
-	// We capture the actual HTTP status via a network listener and check it ourselves.
-	lctx, lcancel := context.WithCancel(b.Context)
-	defer lcancel()
-	var capturedStatus int64
-	chromedp.ListenTarget(lctx, func(ev any) {
-		if e, ok := ev.(*network.EventResponseReceived); ok {
-			if e.Type == network.ResourceTypeDocument {
-				capturedStatus = e.Response.Status
-			}
-		}
-	})
-
 	timeout := navigationTimeout
 	if b.timeout != nil {
 		timeout = *b.timeout
 	}
 	nctx, ncancel := b.waitingContext(navigationTimeout)
 	defer ncancel()
-	err := chromedp.Run(nctx, chromedp.Navigate(url))
-	isHTTPError := err != nil && strings.Contains(err.Error(), "ERR_HTTP_RESPONSE_CODE_FAILURE")
+	result, err := engine.NavigateContext(nctx, url)
 
 	if errors.Is(err, context.DeadlineExceeded) {
 		b.gt.Fatalf("timed out after %s navigating to %s: the navigation never completed (Chrome may have wedged)", timeout, url)
 		return b
 	}
 
-	if err != nil && !isHTTPError {
+	// Chrome 149+ fires Network.loadingFailed (ERR_HTTP_RESPONSE_CODE_FAILURE) for 4xx/5xx
+	// responses, so chromedp.Navigate returns an error where a non-200 status is exactly what the
+	// spec asked for.  That error is not, on its own, a navigation failure - the status we observed
+	// is what decides (see below).  Any other error is a genuine failure and stops us here.  The two
+	// are independent: an HTTP loading failure whose document status we never observed still has to
+	// surface, rather than being mistaken for a destination that simply has no HTTP response.
+	if err != nil && !result.HTTPFailure {
 		b.gt.Fatalf("failed to navigate to %s: %s", url, err.Error())
 		return b
 	}
@@ -99,9 +88,9 @@ func (b *Biloba) navigateWithStatus(url string, status int) *Biloba {
 	// bottom.  No-op in the default chrome-headless-shell lane.
 	b.reassertViewportForCompositor()
 
-	if capturedStatus != 0 {
-		if int(capturedStatus) != status {
-			b.gt.Fatalf("failed to navigate to %s: expected status code %d, got %d", url, status, capturedStatus)
+	if result.Status != 0 {
+		if result.Status != status {
+			b.gt.Fatalf("failed to navigate to %s: expected status code %d, got %d", url, status, result.Status)
 		}
 		return b
 	}
@@ -149,12 +138,7 @@ func (b *Biloba) location() (string, error) {
 			return "", err
 		}
 	}
-	var location string
-	err := chromedp.Run(b.Context, chromedp.Location(&location))
-	if err != nil {
-		return "", err
-	}
-	return location, nil
+	return engine.LocationContext(b.Context)
 }
 
 /*
@@ -222,12 +206,7 @@ func (b *Biloba) title() (string, error) {
 			return "", err
 		}
 	}
-	var title string
-	err := chromedp.Run(b.Context, chromedp.Title(&title))
-	if err != nil {
-		return "", err
-	}
-	return title, nil
+	return engine.TitleContext(b.Context)
 }
 
 /*

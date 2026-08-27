@@ -6,8 +6,7 @@ import (
 	"strings"
 	"sync/atomic"
 
-	"github.com/chromedp/cdproto/runtime"
-	"github.com/chromedp/chromedp"
+	"github.com/onsi/biloba/engine"
 	"github.com/onsi/gomega/gcustom"
 )
 
@@ -56,15 +55,7 @@ func (b *Biloba) RunErr(script string, args ...any) (any, error) {
 
 func (b *Biloba) runErr(script string, awaitPromise bool, args ...any) (any, error) {
 	b.blockIfNecessaryToEnsureSuccessfulDownloads()
-	var encodedResult []byte
-	options := func(p *runtime.EvaluateParams) *runtime.EvaluateParams {
-		p = p.WithUserGesture(true)
-		if awaitPromise {
-			p = p.WithAwaitPromise(true)
-		}
-		return p
-	}
-	err := chromedp.Run(b.Context, chromedp.EvaluateAsDevTools(script, &encodedResult, options))
+	encodedResult, err := engine.EvaluateRawContext(b.Context, script, awaitPromise)
 	if err != nil {
 		if strings.Contains(err.Error(), "_biloba is not defined") {
 			b.reloadBiloba()
@@ -88,7 +79,6 @@ func (b *Biloba) runErr(script string, awaitPromise bool, args ...any) (any, err
 	if len(encodedResult) == 0 {
 		return nil, fmt.Errorf("the script returned undefined, so there is nothing to decode into the pointer you provided.\nIf this script runs purely for its side effects, omit the decode target (or pass nil).\nOtherwise make sure the script returns a JSON-serializable value (e.g. `return true`).")
 	}
-
 	err = json.Unmarshal(encodedResult, args[0])
 	return args[0], err
 }
@@ -293,18 +283,14 @@ func (j JSFunc) Invoke(args ...any) string {
 		return string(j) + "()"
 	}
 
-	encodedArgsBytes, err := json.Marshal(args)
+	// the encoding is shared with the biloba.js handler path (dom.go's runBilobaHandler), so a
+	// JSVar interpolates the same way no matter which path carries the argument
+	encodedArgs, err := engine.EncodeArgs(args...)
 	if err != nil {
 		panic(err)
 	}
-	encodedArgs := string(encodedArgsBytes)
-	for _, arg := range args {
-		if v, ok := arg.(JSVar); ok {
-			encodedArgs = v.interpolate(encodedArgs)
-		}
-	}
 
-	return string(j) + "(..." + string(encodedArgs) + ")"
+	return string(j) + "(..." + encodedArgs + ")"
 }
 
 /*
@@ -348,5 +334,10 @@ type JSVar struct {
 	identifier string
 }
 
-func (j JSVar) MarshalJSON() ([]byte, error)   { return []byte(j.identifier), nil }
-func (j JSVar) interpolate(json string) string { return strings.Replace(json, j.identifier, j.v, 1) }
+func (j JSVar) MarshalJSON() ([]byte, error) { return []byte(j.identifier), nil }
+
+// RawJSPlaceholder and RawJSExpression implement engine.RawJSArg: they are how the shared
+// argument encoder recognizes a JSVar and swaps its JSON placeholder back out for the raw
+// JavaScript expression the user asked for.
+func (j JSVar) RawJSPlaceholder() string { return j.identifier }
+func (j JSVar) RawJSExpression() string  { return j.v }

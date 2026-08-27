@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"strings"
 
+	"github.com/onsi/biloba/engine"
 	"github.com/onsi/gomega"
 	"github.com/onsi/gomega/gcustom"
 	"github.com/onsi/gomega/types"
@@ -55,6 +56,12 @@ func encodeSelector(selector any) (string, error) {
 }
 
 func (b *Biloba) runBilobaHandler(name string, selector any, args ...any) *bilobaJSResponse {
+	// The handler goes to the engine rather than through RunErr, so the two guarantees RunErr
+	// provides every evaluation have to be restated here: throttle against Chrome's
+	// 10-downloads-per-second limit (a Click is the usual way a download gets triggered), and
+	// reinstall the bridge when the page turned over before the frameNavigated event that clears
+	// bilobaIsInstalled reached us.  See runErr in javascript.go - these move together.
+	b.blockIfNecessaryToEnsureSuccessfulDownloads()
 	b.ensureBiloba()
 	result := &bilobaJSResponse{}
 	encoded, err := encodeSelector(selector)
@@ -62,11 +69,18 @@ func (b *Biloba) runBilobaHandler(name string, selector any, args ...any) *bilob
 		result.Err = err.Error()
 		return result
 	}
-	parameters := []any{encoded}
-	parameters = append(parameters, args...)
-	_, err = b.RunErr(b.JSFunc("_biloba."+name).Invoke(parameters...), result)
+	engineResult, err := engine.RunHandlerContext(b.Context, name, encoded, args...)
+	if err != nil && strings.Contains(err.Error(), "_biloba is not defined") {
+		b.reloadBiloba()
+		engineResult, err = engine.RunHandlerContext(b.Context, name, encoded, args...)
+	}
 	if err != nil {
 		result.Err = err.Error()
+	} else {
+		result.Success = engineResult.Success
+		result.Err = engineResult.Err
+		result.Result = engineResult.Result
+		result.Found = engineResult.Found
 	}
 	if result.Found != nil {
 		// one lock + a few comparisons per DOM op, and only when trajectory recording is on
