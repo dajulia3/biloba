@@ -1,9 +1,9 @@
 package biloba
 
 import (
-	"context"
 	"encoding/base64"
 	"fmt"
+	"github.com/onsi/biloba/engine"
 	"maps"
 	"net/http"
 	"reflect"
@@ -1157,12 +1157,7 @@ func (b *Biloba) ensureFetchEnabled() {
 		return
 	}
 
-	// cache first, then Fetch: that way there is no window in which requests are being intercepted
-	// but could still be answered from cache.
-	if err := chromedp.Run(b.Context,
-		network.SetCacheDisabled(true),
-		fetch.Enable().WithPatterns([]*fetch.RequestPattern{{URLPattern: "*"}}),
-	); err != nil {
+	if err := engine.EnableInterceptionContext(b.Context); err != nil {
 		b.gt.Fatalf("Failed to enable network interception:\n%s", err.Error())
 	}
 }
@@ -1325,7 +1320,7 @@ func (b *Biloba) handleRequestStagePause(ev *fetch.EventRequestPaused) {
 		default:
 			action = fetch.ContinueRequest(ev.RequestID)
 		}
-		chromedp.Run(b.Context, action)
+		engine.RunActionContext(b.Context, action)
 	}()
 }
 
@@ -1334,7 +1329,7 @@ func (b *Biloba) handleResponseStagePause(ev *fetch.EventRequestPaused) {
 	go func() {
 		if handler == nil {
 			// Not ours to modify: hand the real response straight back to the page.
-			chromedp.Run(b.Context, fetch.ContinueResponse(ev.RequestID))
+			engine.RunActionContext(b.Context, fetch.ContinueResponse(ev.RequestID))
 			return
 		}
 
@@ -1345,14 +1340,7 @@ func (b *Biloba) handleResponseStagePause(ev *fetch.EventRequestPaused) {
 		for _, h := range ev.ResponseHeaders {
 			original.Headers[h.Name] = h.Value
 		}
-		// GetResponseBody is only valid at the response stage; chromedp decodes base64 for us.  It
-		// must run through chromedp.Run so it picks up the target's CDP executor from the context.
-		var body []byte
-		chromedp.Run(b.Context, chromedp.ActionFunc(func(ctx context.Context) error {
-			var err error
-			body, err = fetch.GetResponseBody(ev.RequestID).Do(ctx)
-			return err
-		}))
+		body, _ := engine.ResponseBodyContext(b.Context, ev.RequestID)
 		original.Body = string(body)
 
 		response := handler.resolve(original)
@@ -1364,7 +1352,7 @@ func (b *Biloba) handleResponseStagePause(ev *fetch.EventRequestPaused) {
 		if headers := response.headerEntries(); len(headers) > 0 {
 			params = params.WithResponseHeaders(headers)
 		}
-		chromedp.Run(b.Context, params)
+		engine.RunActionContext(b.Context, params)
 	}()
 }
 
