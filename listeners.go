@@ -8,6 +8,7 @@ import (
 	"github.com/chromedp/cdproto/page"
 	"github.com/chromedp/cdproto/runtime"
 	"github.com/chromedp/chromedp"
+	"github.com/onsi/biloba/engine"
 )
 
 func (b *Biloba) configureDownloadBehaviorForAllTabsWithBrowserContextID(browserContextId cdp.BrowserContextID) {
@@ -19,10 +20,7 @@ func (b *Biloba) configureDownloadBehaviorForAllTabsWithBrowserContextID(browser
 }
 
 func (b *Biloba) configureDownloadBehavior() {
-	chromedp.Run(b.Context, browser.SetDownloadBehavior(browser.SetDownloadBehaviorBehaviorAllowAndName).
-		WithDownloadPath(b.root.downloadDir).
-		WithEventsEnabled(true).
-		WithBrowserContextID(b.browserContextID))
+	engine.ConfigureDownloadsContext(b.Context, b.browserContextID, b.root.downloadDir)
 }
 
 func (b *Biloba) setUpListeners() {
