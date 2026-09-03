@@ -23,14 +23,14 @@ So an agent or CI run needs nothing: `ginkgo -r -p`, then read the outline and t
 
 1. **Console errors** — any `console.error`/`console.assert` before the failure, replayed under "Console errors logged before this failure" at the **top** of the failure block. On a JS crash (a React error boundary) this is the root cause.
 2. **`⚠` diagnostic notes** — they name the cause outright.
-3. **Poll trajectory** — what the timed-out read did over the whole deadline.
+3. **Poll trajectory** — what the read you failed on did over its whole deadline (absent when the failure had no value read behind it).
 4. **Visual diagnosis** — only on a failed `b.HaveScreenshot`: pixel counts plus the *shape* of the change, in words, before you open any image.
 5. **Screenshot** — `Read` the printed PNG path.
 6. **DOM outline** — "DOM Outline for: '<title>'": indented DOM, `<script>/<style>/<svg>` bodies pruned, whitespace collapsed, capped at 32 KB. Past `... [truncated]`? Raise the cap with **`BILOBA_OUTLINE_MAX`** — a byte count (`=131072`), or `0`/`off` for the whole DOM.
 
 ### Poll trajectory
 
-When an `Eventually` over a polled read (`b.Run`/`b.RunAsync`, a value getter, a geometry getter) times out, Biloba attaches the `(elapsed, value)` series. Gomega's `Timed out … Expected <120>` shows only the final value; the shape is the diagnosis:
+When an `Eventually` over a read that observes and compares a value (`b.HaveInnerText`/`b.HaveCount`/any value matcher, a geometry matcher, `b.EvaluateTo`, `b.GetJSValue`) times out, Biloba attaches the `(elapsed, value)` series **of that assertion**. Gomega's `Timed out … Expected <120>` shows only the final value; the shape is the diagnosis:
 
 | Shape | Means | Do |
 |---|---|---|
@@ -38,7 +38,9 @@ When an `Eventually` over a polled read (`b.Run`/`b.RunAsync`, a value getter, a
 | **monotone staircase** | latency; it nearly made it | widen the timeout |
 | **dip-then-rebound** | a late reflow shoved it back | settle layout before asserting |
 
-On by default; `BilobaConfigPollTrajectory(false)` disables it (and the detached-node signal).
+**No entry is a normal outcome, not a bug.** The series is claimed by the matcher Gomega asked for a failure message, so an entry always describes the read you failed on. Reads that passed, `b.Run` setup lines, and failures with no value read underneath (a `b.Click` whose selector never matched, a getter whose value was never there — that one gets the `AllowMissing` enrichment instead) simply produce nothing. Don't read a missing trajectory as a signal; go to the outline and the screenshot. To get a trajectory for an arbitrary expression, poll it with `b.EvaluateTo`/`b.GetJSValue` rather than wrapping `b.Run` in your own `Eventually` — Biloba only records reads it owns.
+
+On by default; `BilobaConfigPollTrajectory(false)` disables it (and the detached-node signal). **Don't disable it for speed.** Recording takes a lock and renders the value per poll sample, so it isn't free — but measured on a 1,558-spec suite with 2,470 call sites across the instrumented matchers (including gates asserting on whole paragraphs of prose), turning it off saved under a second across the whole run, inside that suite's own run-to-run spread.
 
 ### Visual diagnosis (a failed `b.HaveScreenshot`) → `biloba:visual-assertions`
 
@@ -63,19 +65,13 @@ screenshot "home-desktop" differs from baseline
 | `uniform shift of the whole image, 1px down` | something *above* the subject grew or moved — fix that, don't re-baseline. Never reported for an image thinner than ~16px on either axis (thin rule, focus ring, progress bar) — those get the box reading |
 | `baseline is 800x600, actual is 800x640 (40px taller)` | the box resized; no per-pixel story |
 
+What to do about each → `biloba:visual-assertions`.
+
 `unchanged: everything below y=N` is the complement and usually the faster read. `max channel delta` counts every pixel, including those the channel tolerance absorbed — and when it is in the low single digits Biloba adds `every differing pixel differs by <= N — a rasterisation or compositing difference, not a content change`. Believe it: nothing moved, so look for a shadow or gradient compositing into the capture rather than for an element. A **missing** baseline is a different failure — it says to re-run with `BILOBA_UPDATE_SCREENSHOTS=1`; never script your way past it.
 
 `Read` the `.diff.png` when the words aren't enough. A human at a terminal that renders images also gets it drawn under the diagnosis; you get the path instead, since inline images are off under an agent.
 
-**"never settled" — printed during an update run, not on a failure.** Update mode captures until three in a row match before writing. When that never happens it writes the last capture anyway and prints:
-
-```
-The screenshot for home-desktop never settled: no 3 captures in a row matched, across 8 captures over 2.6s.
-Biloba wrote the last one, but a baseline captured from a page that is still changing will fail on every later run.
-Mask the changing region with b.Mask(...), or track down what is still moving.
-```
-
-The run stays green, so this is easy to scroll past — don't. The baseline just written is unsettled and the next normal run will fail against it. Add a `b.Mask(...)` for the moving region (or stop the page moving), then re-run the update. Re-running the update alone changes nothing. → `biloba:visual-assertions`
+**"never settled" — printed during an update run, not on a failure.** Update mode captures until three in a row match before writing; when that never happens it writes the last capture anyway and says so. The run stays green, so this is easy to scroll past — don't. The baseline just written is unsettled and the next normal run will fail against it. Add a `b.Mask(...)` for the moving region (or stop the page moving), then re-run the update; re-running the update alone changes nothing. → `biloba:visual-assertions`
 
 **"Failed to clear the emulated prefers-color-scheme"** — a dropped `b.InColorSchemes` teardown. The override is target-level and survives navigation, so `b.Prepare()` clears the leak before the next spec; the spec that printed the warning, though, finished rendering in the emulated scheme. Read any odd-looking screenshot from that spec with that in mind.
 
@@ -104,6 +100,20 @@ The run stays green, so this is easy to scroll past — don't. The baseline just
 ```
 
 Reported only when a handler **never fired** *and* was shadowed at least once. **Limit:** it's a failure artifact, so it cannot surface shadowing's other presentation — a leftover *stateful* handler claiming the response, passing it through untouched, spec **green**. Only your own `Eventually(hold.Count).Should(Equal(1))` catches that (`biloba:flaky-specs` §6).
+
+### When the failure is Chrome itself
+
+Every command Biloba sends Chrome runs under a deadline, so an unresponsive browser produces a failing spec instead of a hung suite. Three shapes, each naming its cause on the first line:
+
+| First line | Means | Do |
+|---|---|---|
+| `deadline_exceeded: Chrome did not <command> within 30s` | Chrome accepted the command and never answered | Chrome is wedged or the box is badly overloaded — look for a long synchronous script in the page, or too many parallel processes for the machine |
+| `page_crashed: this tab's renderer crashed` | Chrome reported the crash (promptly on macOS, several seconds later on Linux — a command in between reports `deadline_exceeded` instead) | usually the page itself (OOM, a bad WASM/canvas path). Navigating clears the crash and gets a fresh renderer on macOS; on Linux the tab has stayed dead in our testing, so continue on `b.NewTab()` rather than trusting the crashed one |
+| `browser_gone: the connection to Chrome is closed` | the browser process exited — crashed, OOM-killed, or reaped | not recoverable; the rest of the suite will fail too. Check the machine's memory and whether anything is killing Chrome |
+
+The deadline is generous on purpose (a healthy command answers in milliseconds), so hitting it is a real signal, not a tight-timeout artifact. `WithTimeout` doesn't move it: that knob bounds how long Biloba keeps *retrying*, which is a different question from whether Chrome is alive.
+
+**A suite that ends on Ginkgo's `--timeout` with no failing spec** used to be this class — a command blocked inside a poll's callback, where Gomega can't interrupt it, so the poll deadline never fired. If you still see that shape, it is not this: look for a `chromedp` call of your own on `b.Context` without a deadline.
 
 ### Two failure *messages* that self-explain
 

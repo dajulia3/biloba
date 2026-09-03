@@ -231,6 +231,42 @@ This clearing-of-the-decks between specs allows Biloba to naturally conform to G
 
 Consider Biloba's own test suite: at the time of writing it consists of 185 specs.  These take about 10 seconds to run in series on an M1 Max Macbook Pro.  But only about 2 seconds when run with `ginkgo -p`!  We get performance from parallelization and careful resource reuse; and stability from Chrome's per-tab isolation.
 
+#### Serve your app from a stable origin
+
+Biloba's performance story is reuse across specs - one Chrome process, one reused Root Tab.  There's one more thing worth reusing that isn't Biloba's to reuse for you: **the origin your app is served from.**
+
+The Go reflex is one `httptest.NewServer` per spec.  That hands every spec its own server on an ephemeral port, so **every spec serves the app from a new origin and every asset URL changes** - and the renderer starts cold on each navigation.
+
+The cost is measurable.  On one real suite serving a 1.67 MB bundle: **~31ms of extra renderer work on every `b.Navigate`**, and about **20 seconds off a 1,558-spec `--procs=6` run** once the origin stopped changing.  Note what it *isn't*: turning the HTTP cache off on a stable origin costs nothing, so this is not about re-fetching bytes - the recovered time lands in *script* time.  A suite serving a few kilobytes of static fixtures has far less script work to redo and will see far less; a suite serving a real application bundle should measure its own.
+
+The good news is that you give up nothing to get it.  A brand-new server, with brand-new state and a brand-new on-disk fixture, bound to the **same port**, is exactly as fast as re-navigating the warm one.  Nothing but the origin has to be shared, so per-spec isolation is not the thing you're trading.
+
+The way to get a stable origin is the same pattern Ginkgo uses for [any per-process resource](https://onsi.github.io/ginkgo/#patterns-for-parallel-integration-specs): a shared baseline offset by the process index, rather than an ephemeral port.
+
+```go
+port := 4000 + GinkgoParallelProcess()   // 4001, 4002, 4003, ... one per process shard
+```
+
+[`GinkgoParallelProcess()`](https://onsi.github.io/ginkgo/#parallel-suite-setup-and-cleanup-synchronizedbeforesuite-and-synchronizedaftersuite) returns a stable 1-based index for the running process, so each shard gets its own port and no two collide - and the port is the same on every run, which makes a served URL something you can open in a browser while debugging.  `httptest.NewServer` picks a random port instead, which is the thing you're moving away from; bind your own listener and hand it over:
+
+```go
+l, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+Expect(err).NotTo(HaveOccurred())
+server := httptest.NewUnstartedServer(handler)
+server.Listener.Close()
+server.Listener = l
+server.Start()
+```
+
+From there, two shapes.  They are different trades rather than better and worse, so pick deliberately:
+
+- **Keep one server up per parallel process and reset its state between specs.**  Start it in `SynchronizedBeforeSuite`'s second function, tear it down with `DeferCleanup`, and clear whatever per-spec state it holds in a `BeforeEach`.  This suits a server whose state is a thing you can hand back - an in-memory store, a stub registry, a seeded fixture set.  Biloba's own suite runs one fixture server per process; its fixtures are static files, so there is nothing to reset at all.
+- **Bounce the server between specs, over the same port.**  A fresh server per spec, which suits a server whose per-spec isolation *is* a resource it holds open for its lifetime - a `GinkgoT().TempDir()` it opens a store in, say, where "reset the state" would mean re-pointing a live server at a new root.  It also buys you something the first shape can't: restarting a server over the *same* backing directory is how you prove durability, by making the new process re-read from disk what the old one wrote.
+
+Either way the origin stays put, which is the part that matters here.
+
+> **If you pin a port, give each spec's HTTP client its own transport.**  A zero-value `http.Client` uses `http.DefaultTransport`, whose connection pool is process-global and keyed on `host:port`.  Reuse a port and a spec's first request can be handed a keep-alive socket to the *previous* spec's already-closed server.  It surfaces as an `EOF` out of a `BeforeEach`, pointing at nothing.  Give each fixture its own `&http.Transport{}` and call `CloseIdleConnections()` on teardown.  On the suite that hit it, that is the difference between one fire in nine full-suite runs and none in sixty - so the trap is real and the fix is enough.  It belongs to the pinned-port shape alone: a server that stays up for the whole process never has a dead socket to hand out.
+
 #### Pragmatism: How Biloba Interacts with the DOM
 
 There's an additional approach Biloba takes to optimize for stability and performance.  When it comes to interacting with the DOM, Biloba favors pragmatism over realism.  
@@ -268,7 +304,11 @@ that's it.
 
 > Wat
 
-Every time a page loads, Biloba invokes a short piece of javascript to install a global `_biloba` object on `window`.  This object provides simple Javascript simulations for a bunch of common actions.  The `click` function does the following:
+Biloba hands Chrome a piece of javascript once per tab, to run at the start of every document that tab creates - so a global `_biloba` object is on `window` before any of the page's own scripts run.  Chrome maintains that, rather than Biloba noticing after each navigation that the object is gone and putting it back; a page that navigates itself mid-command can't leave a command looking at a document that never had it.
+
+That covers the tab's child frames as well as its main document, which is more than Biloba needs: it only ever *uses* the main frame's copy, reaching into a same-origin child frame from there.  A copy in a frame it can't pierce - a `sandbox="allow-scripts"` widget on an opaque origin - is unused, and costs a few hundred microseconds of nothing.  Whether Chrome even puts one there depends on the build: `chrome-headless-shell` injects into an opaque origin, full headless Chrome doesn't.  Neither is worth doing anything about; it's noted because "every document" is otherwise easy to read as a promise about frames.
+
+This object provides simple Javascript simulations for a bunch of common actions.  The `click` function does the following:
 
 - Find the element matching `selector`
 - Validate that it is visible
@@ -398,7 +438,42 @@ Of course you can mix and match both of these approaches and have the combinatio
 
 > Wait a minute.  How does `ConnectToChrome` now how to connect to the browser that `SpinUpChrome` starts?  You aren't passing anything from one function to the other!
 
-Good catch.  `SpinUpChrome` writes the connection information to a known file-location on disk that `ConnectToChrome` reads from.  This avoids us having to write some boilerplate code to connect the two `SynchronizedBeforeSuite` functions and is an example of how Biloba tries to integrate deeply with Ginkgo and Gomega to help your tests be concise and focused on... well... _testing_.  Let's dive into that topic next.
+Good catch.  `SpinUpChrome` writes the connection information to a known file-location on disk that `ConnectToChrome` reads from.  This avoids us having to write some boilerplate code to connect the two `SynchronizedBeforeSuite` functions and is an example of how Biloba tries to integrate deeply with Ginkgo and Gomega to help your tests be concise and focused on... well... _testing_.
+
+#### When Chrome stops responding
+
+All of the above assumes Chrome answers.  Sometimes it doesn't: a renderer crashes, the browser process gets killed, or a tab wedges under load and never replies to a command.
+
+Biloba puts a **backstop deadline** on every command it sends to Chrome, so that case fails your spec rather than hanging your suite.  The polling knobs don't cover it: `WithTimeout` bounds the `Eventually` loop Biloba polls in, but a command that never returns blocks *inside* the poll's callback, and Gomega can't interrupt a call that is already blocked.  Without a deadline on the command itself the poll deadline never gets a chance to fire, and a suite that hits this ends on Ginkgo's own `--timeout` with no failing spec to point at.
+
+The backstop is generous on purpose — 30 seconds for a command, two minutes for `b.RunAsync`, whose duration is set by the promise your page awaits rather than by Chrome.  A healthy command comes back in milliseconds, so nothing normal gets near it.  It's a liveness check, not a wait you tune.
+
+When it fires — or when Biloba can tell *why* Chrome went away — the failure says which:
+
+```
+deadline_exceeded: Chrome did not evaluate JavaScript in the page within 30s.
+Biloba bounds every browser command so an unresponsive Chrome fails the spec instead of hanging the suite.
+Chrome is wedged, badly overloaded, or the page is stuck in a long-running synchronous script.
+```
+
+```
+page_crashed: this tab's renderer crashed, so Chrome could not evaluate JavaScript in the page.
+Chrome reported Inspector.targetCrashed for this target - everything the page held is gone.
+Navigate the tab again to get a fresh renderer, or run the rest of the spec on a new tab.
+```
+
+```
+browser_gone: the connection to Chrome is closed, so Chrome could not capture the accessibility tree.
+The browser process is no longer there - it crashed, ran out of memory, or was killed.
+```
+
+Biloba clears the crash when the tab navigates again, on the assumption that the navigation gets a fresh renderer.  Whether it actually does is up to Chrome, and it varies: on macOS the tab comes back, while on Linux the crashed tab has stayed dead in our testing — later commands on it keep failing.  So treat a crashed tab as probably lost rather than reliably recoverable: run the rest of the spec on a new tab (`b.NewTab()`), which is always sound.  A gone browser is not recoverable at all.
+
+The timing of the announcement varies too — prompt on macOS, several seconds later on Linux — so a command issued immediately after the crash may report `deadline_exceeded` before Chrome has said `page_crashed`.  Both are bounded and both name a cause, which is the part Biloba guarantees; which one you see is Chrome's call.
+
+You don't configure the backstop and it isn't one of the four poll-config knobs below.  `WithTimeout` still means "how long to keep retrying", which is a different question from "is Chrome still alive": a command that outruns a tight `WithTimeout` on a loaded machine still gets to finish, exactly as it did before.  The one place the two coincide is a [waiting command](#which-methods-honor-which-knobs) like `Navigate`, where the bounded wait *is* your wait — and there `WithTimeout` overrides the deadline, as it always has.
+
+Let's dive into Ginkgo and Gomega integration next.
 
 ### Ginkgo and Gomega Integration
 
@@ -477,6 +552,16 @@ chromedp.Run(b.Context, chromedp.ActionFunc(func(ctx context.Context) error {
 ```
 
 When a capability is common enough Biloba grows native support for it (see, for example, [Cookies and Storage](#cookies-and-storage)).  Until then, `b.Context` is always there as an escape hatch.
+
+One thing to know when you use it: `b.Context` carries **no deadline**.  Biloba's own commands run under a [backstop deadline](#when-chrome-stops-responding), but a `chromedp.Run(b.Context, ...)` of yours does not — if Chrome stops answering, that call waits forever and takes the suite with it.  Give it one:
+
+```go
+ctx, cancel := context.WithTimeout(b.Context, 30*time.Second)
+defer cancel()
+chromedp.Run(ctx, chromedp.ActionFunc(func(ctx context.Context) error { /* ... */ }))
+```
+
+Derive it from `b.Context` (not `context.Background()`) so chromedp's executor for this tab stays in the chain.
 
 #### Emulation and device conveniences (drop to chromedp)
 
@@ -996,7 +1081,7 @@ One poll, one read, and `blockID` holds what the matcher saw when it passed.
 | [Navigation](#navigation) | `HaveURL`, `HaveTitle` |
 | [Cookies & storage](#cookies-and-storage) | `HaveCookie`, `HaveNumCookies`, `HaveLocalStorageItem`, `HaveSessionStorageItem`, `HaveNumLocalStorageItems`, `HaveNumSessionStorageItems` |
 
-`HaveProperty`, `HaveAttribute`, and `EachHaveProperty` capture in **both** their forms - including the existence-only check, which hands you the value it found while it was checking:
+`HaveProperty`, `HaveAttribute`, `EachHaveProperty`, and the geometry matchers `HaveOffsetTopWithin`/`HaveOffsetLeftWithin`/`HaveGapBetween` capture in **both** their forms - including the existence-only check, which hands you the value it found while it was checking:
 
 ```go
 var poster string
@@ -1724,7 +1809,13 @@ Eventually(".scroller").Should(b.HaveScrollOffset(HaveField("Top", BeNumerically
 Eventually(".hero .sec").Should(b.HaveOffsetTopWithin(".scroller", BeNumerically("<", 120)))
 ```
 
-`HaveOffsetTopWithin`/`HaveOffsetLeftWithin` take the container plus an expected matcher (or a plain value, compared with `Equal`).  All of the getters honor `WithTimeout`/`WithPolling`/`WithContext` and `Immediate()`; the matcher forms are configured through the `Eventually`/`Expect` that polls them.
+`HaveOffsetTopWithin`/`HaveOffsetLeftWithin` take the container plus an expected matcher (or a plain value, compared with `Equal`).  Called with just the container, they're existence-only: they pass once both selector and container have resolved and the element is laid out, without asserting anything about the offset's value (and you can still `.Capture` it):
+
+```go
+Eventually(".hero .sec").Should(b.HaveOffsetTopWithin(".scroller"))
+```
+
+All of the getters honor `WithTimeout`/`WithPolling`/`WithContext` and `Immediate()`; the matcher forms are configured through the `Eventually`/`Expect` that polls them.
 
 **A geometry matcher asks *where* an element is, not *whether* it is.**  Every geometry probe treats two similar-looking situations differently.  An element that is present but not laid out yet (a zero-area box) is a quiet "not ready", so the positive direction keeps polling through late layout.  An element that isn't there at all is an **error**.  Gomega never counts an assertion satisfied while its matcher is erroring - in either direction - so a missing element can't satisfy `ShouldNot`.  That's what keeps `Ω("#toast").ShouldNot(b.BeInViewport())` from passing forever against a page that never rendered `#toast`.  It also means a **wait-for-teardown** spec needs a different verb:
 
@@ -1767,6 +1858,12 @@ delta := b.GetGapBetween(spanSel, cardSel)
 Ω(delta.CenterX).Should(BeNumerically("~", 0, 1))
 
 Eventually(spanSel).Should(b.HaveGapBetween(cardSel, HaveField("CenterX", BeNumerically("~", 0, 1))))
+```
+
+Called with just `otherSelector`, `HaveGapBetween` is existence-only: it passes once both elements are laid out, without asserting anything about the delta (and you can still `.Capture` it):
+
+```go
+Eventually(spanSel).Should(b.HaveGapBetween(cardSel))
 ```
 
 #### On-screen-ness and document order
@@ -2073,13 +2170,34 @@ Like `Click` and `Hover`, the default (fast) versions are pragmatic simulations:
 b.DragTo("#card", "#column")             // drags #card's center onto #column's center
 ```
 
-`DragTo` is **pointer-based**: it drives a drag with `pointerdown`/`pointermove`/`pointerup` (plus the matching `mouse` events) from the source's center to the target's center.  This is what modern drag-and-drop libraries - [@dnd-kit](https://dndkit.com), Sortable, and friends - listen for, so `DragTo` exercises them.  In [realistic mode](#realistic-interactions) it scrolls both elements into view, checks their actionability, and drives the same drag with real CDP mouse input.
+`DragTo` is **pointer-based**: it drives a drag with `pointerdown`/`pointermove`/`pointerup` (plus the matching `mouse` events) from the source's center to the target's center.  This is what modern drag-and-drop libraries - [@dnd-kit](https://dndkit.com), Sortable, and friends - listen for, so `DragTo` exercises them.  In [realistic mode](#realistic-interactions) it brings both elements into view *at one scroll position*, checks their actionability, and drives the same drag with real CDP mouse input - so a drag between two rows of the same scrolling list works, and a drag between endpoints that can't share a screen fails and says so instead of collapsing into a click.
 
 `DragTo` also has a **matcher form** whose subject is the *source*: pass only the target, and poll the source with `Eventually`.  This waits until both elements are present and the drag can be performed - folding the readiness wait into the action, instead of asserting both endpoints exist first:
 
 ```go
 Eventually("#card").Should(b.DragTo("#column"))
 ```
+
+**`DragTo` is the whole gesture.**  The press, the moves, and the release all happen inside the one call, so there is no seam to assert in.  That's fine when the thing you're testing is the *drop* - but a spec whose subject is the **mid-drag** state needs the legs by hand: a tree row that auto-expands after a hover dwell, a drop-target highlight, a spring-loaded folder.  Drive those through [chromedp](#codechromedpcode-breaking-the-fourth-wall) on `b.Context`.  `b.GetBoundingBox` already reports in the space CDP mouse events use - viewport CSS pixels - so `CenterX`/`CenterY` are the coordinates to send:
+
+```go
+src, tgt := b.GetBoundingBox("#row"), b.GetBoundingBox("#folder")   // measure BOTH before pressing
+ctx, cancel := context.WithTimeout(b.Context, 10*time.Second)      // b.Context carries no deadline
+defer cancel()
+
+Expect(chromedp.Run(ctx,
+    chromedp.MouseEvent(input.MousePressed, src.CenterX, src.CenterY, chromedp.ButtonType(input.Left), chromedp.ClickCount(1)),
+    chromedp.MouseEvent(input.MouseMoved, tgt.CenterX, tgt.CenterY, chromedp.ButtonType(input.Left)),
+)).To(Succeed())
+
+Eventually("#folder").Should(b.HaveAttribute("aria-expanded", "true"))   // asserted with the button still down
+
+Expect(chromedp.Run(ctx,
+    chromedp.MouseEvent(input.MouseReleased, tgt.CenterX, tgt.CenterY, chromedp.ButtonType(input.Left), chromedp.ClickCount(1)),
+)).To(Succeed())
+```
+
+Measure both endpoints *before* the press, the way `DragTo` does, and for the same reason: a measurement taken between the legs can be taken after something moved.
 
 `DragTo` does **not** drive native HTML5 drag-and-drop (the `draggable` attribute and the `dragstart`/`dragover`/`drop` event family).  Synthesizing the native protocol convincingly requires the real OS-level drag machinery, which is outside Biloba's atomic model.  If you need to test a native HTML5 `draggable` interaction, drop down to chromedp via `b.Context`.
 
@@ -2220,7 +2338,7 @@ In realistic mode:
 - **`Click`** scrolls the element to the center of the viewport, **waits for its box to stop moving**, verifies it is enabled and is the topmost element at its center point (so an occluding overlay or an off-screen element does **not** click through - the matcher form keeps polling, the immediate form fails the spec), moves the real pointer to it (so hover-gated clicks register), then dispatches a real `mousePressed`/`mouseReleased`.  This is the inverse of plain `Click`, which clicks the element directly regardless of what's on top of it.  Clicks through `>>>` same-origin iframe boundaries are translated to top-level viewport coordinates so the real mouse lands in the right place.  [Pointer options](#pointer-options-offsets-and-modifiers) are honored natively: `b.At(x,y)` retargets to the offset point (translated to the viewport and bounds-checked), and `b.Shift()`/etc. hold a real CDP modifier bitmask down.
 - **`ClickEachImmediately`** clicks every matching element with real input, scrolling and re-measuring each in turn, and skipping any that are hidden, disabled, off-screen, or obscured.
 - **`DblClick`** / **`RightClick`** / **`MiddleClick`** apply the same scroll/stability/occlusion machinery as `Click`, then dispatch a real double-click (two click sequences with an incrementing click-count, so Chrome fires a genuine `dblclick`), right-button click (firing the browser's native `contextmenu`), or middle-button click (firing `auxclick`) - all honoring pointer options.
-- **`DragTo`** scrolls and measures stable, actionable points for *both* the source and target, then drives a real CDP pointer drag - press at the source, several interpolated moves toward the target, release at the target - so pointer-based drag-and-drop libraries see genuine pointer input (it still does not drive native HTML5 `draggable`).
+- **`DragTo`** measures stable, actionable points for *both* the source and target **at one scroll position**, then drives a real CDP pointer drag - press at the source, several interpolated moves toward the target, release at the target - so pointer-based drag-and-drop libraries see genuine pointer input (it still does not drive native HTML5 `draggable`).  The single scroll position matters: measuring one endpoint at a time scrolls the target into view and moves the source out from under the coordinate already recorded for it, and for two rows of one `overflow: auto` list both coordinates land on the pane's center - where the press and release arrive together and the page receives a click on the target.  So Biloba tries the current scroll position first (the common case, and it disturbs nothing), then the pair framed around their midpoint, then each endpoint scrolled in with the other scrolled second (which is what endpoints in separate panes need).  If no position shows both - endpoints further apart than their pane is tall - it fails and names both endpoints rather than dispatching a drag it knows is wrong.
 - **`ScrollWheel`** scrolls the element into view, measures a stable, actionable point, then dispatches a real CDP wheel event there - genuine trusted input that actually scrolls the page (unlike the synthetic fast `ScrollWheel`, which dispatches a `wheel` event and then manually scrolls the nearest scrollable ancestor).
 - **`Tap`** applies the same scroll/stability/occlusion machinery as `Click`, then dispatches a real CDP touch (`touchStart`/`touchEnd`) at the element's center (or `b.At` offset) - genuine trusted touch input (unlike the synthetic fast `Tap`, which dispatches touch/pointer events plus a `click`).
 - **`Hover`** scrolls into view and moves the real mouse to the element's center, which - unlike the synthetic `Hover` - activates genuine CSS `:hover` (e.g. a menu that only appears via a `:hover` rule).
@@ -2263,7 +2381,7 @@ Biloba's interactions run on two tracks: the fast default (`b`) is an atomic Jav
 | `ClickEachImmediately` | `el.click()` on every visible+enabled match | real click on each, re-measured; skips hidden/disabled/off-screen/obscured |
 | `DblClick` | two `el.click()`s + a `dblclick` event | real double-click (incrementing click-count) with full actionability |
 | `RightClick` / `MiddleClick` | synthetic `mousedown`/`mouseup` + `contextmenu` / `auxclick` | real right/middle-button click (native `contextmenu` / `auxclick`) |
-| `DragTo(src,tgt)` | synthetic pointer drag sequence | real CDP pointer drag (press → interpolated moves → release). Neither drives native HTML5 `draggable` |
+| `DragTo(src,tgt)` | synthetic pointer drag sequence, both centers measured in one atomic read | real CDP pointer drag (press → interpolated moves → release), both endpoints measured at one scroll position; fails if none shows both. Neither drives native HTML5 `draggable` |
 | `ScrollWheel(dx,dy)` | `wheel` event, then manually scrolls the nearest scrollable ancestor | real trusted CDP wheel event |
 | `Tap` | synthetic touch + pointer events + `click` | real CDP touch (`touchStart`/`touchEnd`) |
 | `Hover` | synthetic pointer/mouse events - **does not** trigger CSS `:hover` | real pointer move - activates genuine CSS `:hover` |
@@ -2277,6 +2395,8 @@ A couple of deliberate gaps are worth calling out, both reachable via [chromedp]
 
 - **Occlusion on the fast track.** Plain `Click` intentionally clicks through overlays (the atomic, no-scroll default).  When you want to *assert* an element is genuinely clickable without paying for full realistic mode, use the deterministic [`b.BeClickable()`](#existence-counting-visibility-and-interactibility) matcher (visible + enabled + topmost-at-its-center); it stays opt-in rather than changing `Click`'s default, so existing click-through behavior is never silently broken.
 - **Native HTML5 drag-and-drop, native `<select>` realism, cross-origin iframes, and device/mobile emulation** are not driven by either track by design - drop to chromedp for those (see the [emulation recipes](#emulation-and-device-conveniences-drop-to-chromedp)).
+
+And one asymmetry to expect when you move a spec from one track to the other: **a `position: fixed` footer or banner is invisible to the fast track and perfectly solid to the realistic one.**  `element.click()` does no hit-testing, so the fast track reaches an element the footer is sitting on top of; real pointer input lands on the footer.  A spec that has passed for months can fail the moment it switches to `b.Realistic()`, because a row near the bottom of a short list is genuinely underneath the footer.  Both tracks are right - the realistic one is telling you a user could not reach that element either.  Scroll it clear of the footer (`b.ScrollIntoView(sel, b.AtTopOffset(px))`) rather than assuming your interaction code is wrong.
 
 ### Uploading Files
 
@@ -2723,6 +2843,8 @@ To make sure your suite doesn't accidentally get blocked by a dialog box Biloba 
 - `alert` dialog are automatically acknowledged
 - `confirm` and `prompt` dialogs are automatically cancelled
 - `beforeunload` is automatically accepted
+
+One dialog is exempt from all of this: `b.Prepare()` ends by navigating the reused tab to `about:blank`, and if the previous spec's page registered a `beforeunload` handler that navigation raises its dialog.  Biloba accepts that one silently - it is not recorded in the new spec's `b.Dialogs()` and it does not print the "you should add an explicit dialog handler" warning.  It belongs to the spec that just ended, not the one about to run.
 
 You can override these by registering a series of dialog handlers.  You can have as many handlers as you'd like and more recently registered handlers get first dibs on new dialog boxes.  All handlers are reset by `b.Prepare()` so you'll need to re-register them between specs (which you typically do, anyway, in a `BeforeEach` or `It`).
 
@@ -3869,6 +3991,13 @@ Do what it says.  `b.ScrollIntoView` with `b.WithinScroller` scrolls the pane ra
 
 An `overflow: hidden` ancestor that isn't actually cutting the subject off — a card clipping its own rounded corners — is not reported.  The check is about what got painted, not about what could clip in principle.
 
+**Triaging a partial clip.**  The warning tells you *how much* was painted; it can't tell you whether the rest could ever have been, and that's the difference between a fact about your design and a bug.  Compare two numbers — the subject's own height, and the pane's visible band:
+
+- **Subject taller than the band.**  No scroll position paints all of it.  The warning will fire on every run forever, and it is describing the design rather than reporting a fault: capture a smaller subject, or accept the crop and know what the baseline covers.
+- **Subject fits in the band.**  The missing part *is* reachable — the pane is simply scrolled somewhere else.  That's the fixable case: `b.ScrollIntoView(subject, b.WithinScroller(pane))` before the capture, gate on `b.BeInViewport(b.Fully())`, and the warning goes away.
+
+`b.GetBoundingBox` on the subject and on the ancestor the warning names gives you both numbers, and `b.GetScrollOffset` on the ancestor tells you where the pane currently sits.
+
 #### Determinism
 
 A baseline is only as good as the page's ability to render the same pixels twice.  Biloba handles some of the usual obstacles for you; others it doesn't, and it's better to know which is which.
@@ -3981,16 +4110,20 @@ When you're debugging a failure whose interesting DOM lands past the cap, overri
 | `587 → 540 → … → 130`, didn't quite land | latency — it nearly made it | widen the timeout |
 | reached `~24`, then rebounded to `300` | a late reflow shoved it back | bounded `ResizeObserver` |
 
-The *trajectory* is the diagnosis, so Biloba records it.  Every polled read — a [`b.Run`](#running-arbitrary-javascript)/`b.RunAsync` evaluation, a value getter like [`b.GetProperty`](#properties), or a [geometry getter](#geometry) — appends its `(elapsed, value)` to a small per-tab recorder keyed by the probe.  Biloba tracks the **most recently polled entity** (when the probe changes, the prior series resolved and moved on), and on failure attaches that series, run-length-collapsed so a string of identical values folds into one row:
+The *trajectory* is the diagnosis, so Biloba records it.  Every read that observes a value and compares it — a value matcher like [`b.HaveInnerText`](#working-with-the-dom) or [`b.HaveCount`](#working-with-the-dom), a [geometry matcher](#geometry), [`b.EvaluateTo`](#running-arbitrary-javascript), [`b.GetJSValue`](#running-arbitrary-javascript) — appends its `(elapsed, value)` to a small per-tab recorder keyed by the probe.  On failure Biloba attaches the series, run-length-collapsed so a string of identical values folds into one row:
 
 ```
 Poll trajectory
-Probe: Run document.querySelector("#card").getBoundingClientRect().top
+Probe: EvaluateTo document.querySelector("#card").getBoundingClientRect().top
 18 samples over 2.00s, 1 distinct values — flat (value never changed: the page is not re-evaluating this probe):
   +0.00s  587   (held ×18 through +2.00s)
 ```
 
-A flat line points straight at "compute-once product bug, no source-reading required"; a monotone staircase reads as latency; a dip-then-climb reveals the late reflow.  This is **on by default** and rides the same failure-artifact hook as the outline and screenshot (so a passing spec pays only a few nanoseconds per poll to record, and emits nothing).  Turn it off with `BilobaConfigPollTrajectory(false)`.
+A flat line points straight at "compute-once product bug, no source-reading required"; a monotone staircase reads as latency; a dip-then-climb reveals the late reflow.  This is **on by default** and rides the same failure-artifact hook as the outline and screenshot, so a passing spec records and emits nothing.
+
+Recording is not free - each poll sample takes a lock and renders the observed value - so it's fair to ask what leaving it on costs.  Measured on a 1,558-spec suite that leans hard on the instrumented matchers (2,470 call sites across `HaveCount`, `HaveTextContent`, `HaveAttribute`, `HaveProperty`, `HaveInnerText` and the `Each*` forms, including gates that assert on whole paragraphs of rendered prose): turning it **off** saved **under a second across the whole run**, inside that suite's own run-to-run spread.  That is the case built to be expensive, so a suite asserting on short values will see less.  Turn it off with `BilobaConfigPollTrajectory(false)` if you want it off, but not for the performance.
+
+**The entry always belongs to the assertion that failed.**  Biloba claims the series at the moment Gomega asks the failing matcher for its message, so what you read is what *that* read did over its own deadline — never a leftover from an earlier one.  The corollary is that plenty of failures get no `Poll trajectory` entry at all: a read that passed leaves nothing behind, and neither does a failure with no polled value read underneath it — a `b.Click` that timed out because the selector never matched, a [`b.Run`](#running-arbitrary-javascript) setup line, a getter that timed out because the value was never there to read (the [`AllowMissing` enrichment](#outline) covers that one).  A missing entry means there was no value trajectory to show, not that something went wrong; an entry describing a read you did not fail on would be worse than silence, so Biloba does not print one.  To watch an arbitrary expression over a deadline and get a trajectory when it times out, poll it with `b.EvaluateTo` (or `b.GetJSValue`) rather than hand-rolling an `Eventually` around `b.Run`.
 
 **Detached-node signal.**  "The selector never matched" and "the selector matched, and then the node was yanked out from under it" produce the *same* timeout - and they have completely different fixes.  So when a poll's selector matched at least once and then stopped, Biloba says so:
 

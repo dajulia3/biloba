@@ -108,6 +108,28 @@ var _ = BeforeEach(func() {
 
 Per-process browsers and fresh-tab-per-spec can be combined.
 
+**Serve the app from a stable origin — the same trade, one level out.** The Go reflex is one `httptest.NewServer` per spec, which puts every spec on a new ephemeral port: a new origin, every asset URL changed, the renderer cold on every navigation. Measured on one real suite (1.67 MB bundle): **~31ms extra per `b.Navigate`, ~20s off a 1,558-spec `--procs=6` run.** It is not the HTTP cache — disabling that on a stable origin costs nothing, and the recovered time lands in *script* time. Small static fixtures will see much less.
+
+You give up no isolation to get it: a brand-new server with brand-new state, bound to the **same port**, is as fast as re-navigating the warm one. Nothing but the origin has to be shared.
+
+Get the stable port the way Ginkgo shards any per-process resource — a shared baseline plus the process index, **not** an ephemeral port (→ `ginkgo:parallelism`):
+
+```go
+port := 4000 + GinkgoParallelProcess()   // 4001, 4002, ... one per shard, same every run
+l, _ := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+server := httptest.NewUnstartedServer(handler)
+server.Listener.Close()
+server.Listener = l
+server.Start()
+```
+
+Then pick one of two shapes deliberately — different trades, not better and worse:
+
+- **Keep one server up per process and reset its state per spec.** Start in `SynchronizedBeforeSuite`'s second function with `DeferCleanup`, clear state in a `BeforeEach`. Suits a server whose state is handed back cheaply — in-memory store, stub registry, seeded fixtures. (Biloba's own suite runs one fixture server per process; static files, nothing to reset.)
+- **Bounce the server between specs over the same port.** Suits a server whose per-spec isolation *is* a resource it holds for its lifetime (a `GinkgoT().TempDir()` store), where resetting would mean re-pointing a live server at a new root. Also buys a durability check the other shape can't: restart over the *same* directory and make the new process re-read from disk what the old one wrote.
+
+**If you pin a port, give each fixture its own `&http.Transport{}`.** A zero-value `http.Client` uses `http.DefaultTransport`, whose pool is process-global and keyed on `host:port` — so a spec's first request can get a keep-alive socket to the *previous* spec's closed server, surfacing as an `EOF` out of a `BeforeEach` that points at nothing. `CloseIdleConnections()` on teardown. Measured on the suite that hit it: one fire in nine full-suite runs before the fix, none in sixty after. Only the pinned-port shape has this problem.
+
 ## 4. Suite-level config
 
 `SpinUpChrome(GinkgoT(), ...)`:

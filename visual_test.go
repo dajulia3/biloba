@@ -215,11 +215,12 @@ var _ = Describe("Visual assertions", func() {
 		})
 
 		It("is not fooled by a page that repeats on a period", func() {
-			// #periodic repeats every 160ms, which is what a fixed 100ms capture interval samples at
-			// once the capture round trip is counted: every pair of captures matches and the element
-			// reads as settled.  The gaps between captures grow by a different amount each time, and
-			// each of those amounts is less than a full period, so no two captures in a row can land on
-			// the same shade - never mind three.
+			// #periodic repeats with a period of two captures - it holds a shade for two captures and
+			// then swaps - so every other adjacent pair matches and a settle check that stopped at two
+			// would write this baseline.  Three in a row never happens, so the streak of three does not
+			// fall for it.  The cycle advances on the captures rather than on a wall-clock timer, which
+			// is what keeps this deterministic rather than a question of whether this machine's capture
+			// round trip happens to alias with the fixture's period.
 			b.Run("startPeriodicChurn()")
 			generate("#periodic", "periodic")
 			Ω(printed()).Should(ContainSubstring("The screenshot for periodic never settled"))
@@ -266,18 +267,30 @@ var _ = Describe("Visual assertions", func() {
 		It("applies that schedule to the page it is capturing", func() {
 			generate("#adversary", "adversary")
 
-			var captureTimes []float64
+			var captureTimes, releaseTimes []float64
 			b.Run("window.captureTimes", &captureTimes)
+			b.Run("window.releaseTimes", &releaseTimes)
 			Ω(captureTimes).Should(HaveLen(8), "a page that never settles is captured the full number of times")
+			Ω(releaseTimes).Should(HaveLen(8), "every capture ends as well as begins")
 
-			gaps := []float64{}
+			// The page timestamps both ends of every capture, so the interval from the end of one to the
+			// start of the next is the wait alone - the capture round trip is outside it.  That makes the
+			// claim one-sided: a sleep never returns early, and the little that is left inside the
+			// interval (the fonts round trip, the comparison) only ever adds to it.  So each wait must be
+			// at least its scheduled gap, load can only push the observed numbers up, and a schedule that
+			// stopped growing would fail at the tail rather than depending on how fast this machine
+			// happens to be.  The schedule's own shape is pinned by the spec above.
+			schedule := biloba.ScreenshotSettleScheduleForTest()
+			waits := []time.Duration{}
 			for i := 1; i < len(captureTimes); i++ {
-				gaps = append(gaps, captureTimes[i]-captureTimes[i-1])
+				waits = append(waits, time.Duration(captureTimes[i]-releaseTimes[i-1])*time.Millisecond)
 			}
-			// the last three gaps are nominally 1080ms longer in total than the first three; compared in
-			// threes so the jitter of a single capture round trip cannot decide the outcome
-			early, late := gaps[0]+gaps[1]+gaps[2], gaps[4]+gaps[5]+gaps[6]
-			Ω(late).Should(BeNumerically(">", early+300), "the captures did not slow down: gaps were %v", gaps)
+			Ω(waits).Should(HaveLen(len(schedule)))
+			for i, wait := range waits {
+				// the 5ms allows for Date.now() rounding at both ends of the interval
+				Ω(wait).Should(BeNumerically(">=", schedule[i]-5*time.Millisecond),
+					"wait %d was %s, shorter than the %s it was scheduled to be: the waits were %v against a schedule of %v", i, wait, schedule[i], waits, schedule)
+			}
 		})
 	})
 

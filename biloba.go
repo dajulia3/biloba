@@ -31,13 +31,14 @@ import (
 	"github.com/chromedp/cdproto/cdp"
 	"github.com/chromedp/cdproto/emulation"
 	"github.com/chromedp/cdproto/fetch"
+	"github.com/chromedp/cdproto/inspector"
 	"github.com/chromedp/cdproto/network"
 	"github.com/chromedp/cdproto/page"
 	"github.com/chromedp/cdproto/target"
 	"github.com/chromedp/chromedp"
 )
 
-const BILOBA_VERSION = "0.15.2"
+const BILOBA_VERSION = "0.15.4"
 
 // minimumSupportedChromeMajor is the oldest Chrome major version Biloba's behavior is known to
 // assume.  Biloba tracks (and CI continuously validates against) the latest stable Chrome, so this
@@ -230,7 +231,7 @@ func (b *Biloba) applyHighFidelityViewport() error {
 		return nil
 	}
 	return retryTransientCDP(func() error {
-		return chromedp.Run(b.Context, chromedp.EmulateViewport(
+		return b.runCDP("apply the high-fidelity viewport emulation", chromedp.EmulateViewport(
 			int64(b.ChromeConnection.WindowWidth),
 			int64(b.ChromeConnection.WindowHeight),
 			emulateViewportMatchingScreen,
@@ -250,10 +251,10 @@ func (b *Biloba) reassertViewportForCompositor() {
 		return
 	}
 	var dims []int64
-	if err := chromedp.Run(b.Context, chromedp.Evaluate("[window.innerWidth, window.innerHeight]", &dims)); err != nil || len(dims) != 2 || dims[0] <= 0 || dims[1] <= 0 {
+	if err := b.runCDP("measure the viewport", chromedp.Evaluate("[window.innerWidth, window.innerHeight]", &dims)); err != nil || len(dims) != 2 || dims[0] <= 0 || dims[1] <= 0 {
 		return
 	}
-	_ = chromedp.Run(b.Context, chromedp.EmulateViewport(dims[0], dims[1], emulateViewportMatchingScreen))
+	_ = b.runCDP("re-apply the viewport emulation", chromedp.EmulateViewport(dims[0], dims[1], emulateViewportMatchingScreen))
 }
 
 // applyFocusEmulation makes this tab behave as though its page always holds the system focus.  An
@@ -266,7 +267,7 @@ func (b *Biloba) reassertViewportForCompositor() {
 // page as focused.
 func (b *Biloba) applyFocusEmulation() error {
 	return retryTransientCDP(func() error {
-		return chromedp.Run(b.Context, emulation.SetFocusEmulationEnabled(true))
+		return b.runCDP("enable focus emulation", emulation.SetFocusEmulationEnabled(true))
 	})
 }
 
@@ -327,6 +328,11 @@ func SpinUpChrome(ginkgoT GinkgoTInterface, options ...SpinUpOption) ChromeConne
 
 	cc := ChromeConnection{HighFidelity: cfg.highFidelity}
 
+	// NOTE: the first-contact probes below deliberately run UNBOUNDED, unlike every command in cdp.go.
+	// chromedp allocates the browser (and its target) lazily, inside the first chromedp.Run on a
+	// context - so that Run's context OWNS the Chrome process, and cancelling it kills the browser.
+	// Putting a deadline here does not bound a hang, it tears Chrome down mid-suite.  Browser start-up
+	// has its own bound: chromedp.WSURLReadTimeout, set above.
 	if cfg.highFidelity {
 		// Full ("new") headless renders into a small virtual screen (default 800x600) regardless of
 		// --window-size, so an un-emulated tab reports window.innerHeight well below the requested
@@ -447,9 +453,9 @@ func BilobaConfigFailureOutlines(enabled ...bool) func(*Biloba) {
 }
 
 /*
-Pass BilobaConfigPollTrajectory to [ConnectToChrome] to control whether Biloba records the (elapsed, value) trajectory of polled reads and attaches the most-recent series to the failure block.
+Pass BilobaConfigPollTrajectory to [ConnectToChrome] to control whether Biloba records the (elapsed, value) trajectory of polled reads and attaches the failing read's series to the failure block.
 
-When an Eventually(...) over a polled read times out, the trajectory is the diagnosis: a flat line means the product computed a value once and never reconciled (a product bug, not a short timeout); a monotone approach means latency (it nearly made it); a dip-then-rebound means a late reflow shoved it back.  Biloba records the trajectory of the most-recently-polled entity (a [Biloba.Run]/[Biloba.RunAsync] script, or a value/geometry getter) and, on failure, attaches it run-length-collapsed so equal values fold into one row.
+When an Eventually(...) over a polled read times out, the trajectory is the diagnosis: a flat line means the product computed a value once and never reconciled (a product bug, not a short timeout); a monotone approach means latency (it nearly made it); a dip-then-rebound means a late reflow shoved it back.  Biloba records the trajectory of every read that observes a value and compares it (a value matcher like [Biloba.HaveInnerText], a geometry matcher, [Biloba.EvaluateTo], [Biloba.GetJSValue]) and attaches the series belonging to the assertion that actually failed, run-length-collapsed so equal values fold into one row.  A read that passed - or a failure with no polled read behind it - gets no entry at all: an unrelated trajectory would be worse than none.
 
 It is on by default; BilobaConfigPollTrajectory(false) turns it off.
 
@@ -705,6 +711,9 @@ func (b *Biloba) bootstrapIsolatedTab(allocatorContext context.Context, bootstra
 		}
 
 		bootstrapCtx, cancelBootstrap := chromedp.NewContext(allocatorContext, bootstrapOpts...)
+		// Unbounded on purpose: this Run is what allocates the browser and its target on bootstrapCtx,
+		// so a deadline here would own - and then kill - the Chrome connection.  See the note in
+		// SpinUpChrome.
 		if err := chromedp.Run(bootstrapCtx, chromedp.Evaluate("1", nil)); err != nil {
 			cancelBootstrap()
 			lastErr = err
@@ -794,11 +803,28 @@ type tabState struct {
 	// Prepare: it is invalidated by navigation, not by the spec boundary.
 	bilobaIsInstalled bool
 
+	// bilobaAutoInstalled records that Chrome accepted the standing "run biloba.js at the start of
+	// every document" registration (see installBilobaOnEveryDocument), which is what lets a navigation
+	// STOP invalidating bilobaIsInstalled: the next document already has _biloba before its own scripts
+	// run.  False means the registration did not take, and the tab falls back to reinstalling after
+	// each navigation.  Set once per tab, at setup.
+	bilobaAutoInstalled bool
+
+	// targetCrashed records that Chrome told us this tab's renderer died (Inspector.targetCrashed), so
+	// a subsequent command failure can say WHY instead of just "context deadline exceeded".  Cleared
+	// by the next navigation - which gives the target a fresh renderer - and by Prepare.
+	targetCrashed bool
+
 	downloads       map[string]*Download
 	downloadHistory map[string]time.Time
 
 	dialogHandlers []*DialogHandler
 	dialogs        []*Dialog
+
+	// resetting is true only while Prepare's closing about:blank navigation is unloading the page the
+	// previous spec left behind.  A dialog raised by that navigation (a beforeunload) belongs to the
+	// spec that just ended, so it is accepted silently rather than recorded against the next one.
+	resetting bool
 
 	// consoleErrors accumulates rendered console.error / console.assert messages seen on this tab so
 	// attachFailureArtifactsIfFailed can replay them at the top of the failure block - the originating
@@ -889,7 +915,7 @@ type Biloba struct {
 	colorSchemeEmulated *bool
 
 	// pollTrajectory opts a suite into recording the (elapsed, value) trajectory of polled reads and
-	// attaching the most-recent series on failure (see BilobaConfigPollTrajectory).  Off by default.
+	// attaching the failing read's series on failure (see BilobaConfigPollTrajectory).  On by default.
 	pollTrajectory bool
 	probes         *probeRecorder // the most-recent-polled-entity trajectory recorder for this tab
 
@@ -1001,7 +1027,7 @@ func (b *Biloba) Prepare() {
 	// ensureFetchEnabled turned off (a cached response raises no Fetch event, so interception
 	// would silently miss it)
 	if wasFetchEnabled {
-		chromedp.Run(b.Context, fetch.Disable(), network.SetCacheDisabled(false))
+		b.runCDP("disable network interception", fetch.Disable(), network.SetCacheDisabled(false))
 	}
 
 	// attachFailureArtifactsIfFailed clears the per-spec poll diagnostics on its way out, but it is
@@ -1032,6 +1058,19 @@ func (b *Biloba) Prepare() {
 	// persist in the browser context / on the origin) to keep specs independent
 	b.resetBrowsingState()
 
+	// This navigation unloads whatever page the previous spec left behind - which raises that page's
+	// beforeunload dialog, after the state reset above and inside the next spec's BeforeEach.  It would
+	// otherwise show up as the new spec's first recorded dialog and print "you should add an explicit
+	// dialog handler" against a spec that never opened a dialog.  Flag the reset so Prepare's own
+	// dialog is accepted silently; see handleEventJavascriptDialogOpening.
+	b.lock.Lock()
+	b.state.resetting = true
+	b.lock.Unlock()
+	defer func() {
+		b.lock.Lock()
+		b.state.resetting = false
+		b.lock.Unlock()
+	}()
 	b.Navigate("about:blank")
 }
 
@@ -1420,6 +1459,23 @@ var bilobaJS string
 func (b *Biloba) handleEventFrameNavigated(_ *page.EventFrameNavigated) {
 	b.lock.Lock()
 	defer b.lock.Unlock()
+	// The new document already has _biloba when Chrome is running it at document start for us, so the
+	// install survives the navigation and re-sending the script would be pure waste.  Only a tab whose
+	// registration did not take has to reinstall.
+	if !b.state.bilobaAutoInstalled {
+		b.state.bilobaIsInstalled = false
+	}
+	// A frame navigated, so this target has a live renderer again - whatever crash we recorded is over.
+	b.state.targetCrashed = false
+}
+
+// handleEventTargetCrashed records that this tab's renderer died so the next command that fails can
+// name the cause (see diagnoseCDPError).  window._biloba died with the page, so the install flag goes
+// with it.
+func (b *Biloba) handleEventTargetCrashed(_ *inspector.EventTargetCrashed) {
+	b.lock.Lock()
+	defer b.lock.Unlock()
+	b.state.targetCrashed = true
 	b.state.bilobaIsInstalled = false
 }
 
