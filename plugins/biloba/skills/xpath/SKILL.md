@@ -1,6 +1,6 @@
 ---
 name: xpath
-description: Build XPath selectors with Biloba's b.XPath() mini-DSL — tag/id/class/text/attribute predicates, boolean logic with b.XPredicate(), tree navigation (Child/Descendant/Parent/Ancestor/siblings), WithChildMatching + b.RelativeXPath, indexing (Nth/First/Last), and the XPath().WithText text predicates. Use when constructing or debugging an XPath selector for a Biloba action or matcher — the rare power tool after CSS and semantic locators. Covers the common pitfalls (XPredicate, RelativeXPath, ancestor-or-self, no shadow/iframe crossing).
+description: Build or debug selectors using Biloba’s XPath DSL when tree axes or text-node queries require XPath.
 ---
 
 # The Biloba XPath DSL

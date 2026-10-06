@@ -1,6 +1,6 @@
 ---
 name: setup
-description: Wire Biloba into your project's Ginkgo suite — go get, the bootstrap file (SynchronizedBeforeSuite + Prepare), installing chrome-headless-shell, choosing high-fidelity vs the fast headless shell, the three bootstrap variations (shared vs per-process browser, reusable vs fresh tab), window size, the .gitignore split between the throwaway screenshots directory and the committed visual baselines directory, and running the suite. Use when setting up Biloba in a repo or changing the suite-level Chrome lifecycle.
+description: Wire Biloba into a Ginkgo suite or change its Chrome lifecycle, isolation, or suite configuration.
 ---
 
 # Setting up Biloba in your suite
@@ -143,4 +143,4 @@ ginkgo -r -p -randomize-all  # also enforces spec independence
 
 ## Next
 
-**Before you write a single spec, load `biloba:write-tests`** — the most consequential authoring decision (CSS hook vs. locator vs. XPath) lives there, and generic-automation muscle memory gets it wrong. Reach for `biloba:api` for exact method/matcher names.
+For authoring idioms use `biloba:write-tests`; for exact method/matcher names use `biloba:api`. Read only the guidance relevant to the next task.
