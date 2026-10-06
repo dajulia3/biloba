@@ -1,6 +1,6 @@
 ---
 name: realistic-mode
-description: Use Biloba's realistic interaction track (b.Realistic()) when a spec must exercise the realism the fast default trades away — clicking through/around an occluding overlay, a menu that opens on CSS :hover, scroll-into-view, a pointer drag (@dnd-kit/Sortable), real wheel scrolling, or touch. Covers what each interaction track actually does (the fast-vs-realistic capability matrix), the inline/per-spec/per-suite (Label) patterns, when NOT to use it, and BeClickable() as a cheaper occlusion guard. Use when testing occlusion/hover/drag/scroll-sensitive flows or deciding fast vs realistic.
+description: Use b.Realistic() for Biloba tests whose contract requires real pointer input, occlusion checks, CSS hover, scrolling, or touch.
 ---
 
 # Realistic interactions
@@ -20,7 +20,7 @@ Docs: <https://onsi.github.io/biloba/#realistic-interactions>.
 
 ## When to reach for it
 
-Quarantine it to a handful of smoke tests. It costs real round-trips and can reintroduce the timing flake the atomic model avoids — that's the deliberate, opt-in cost.
+Use it for specs whose contract requires real input or hit-testing. It costs round-trips and can introduce timing sensitivity, so prefer the fast track for assertions that do not depend on those behaviors.
 
 | You need to test | Why the fast track misses it |
 |---|---|
@@ -87,6 +87,6 @@ var _ = Describe("checkout (realistic smoke)", Label("realistic"), func() {
 
 ## Pitfalls
 
-- **Don't realistic-mode the whole suite.** It defeats the performance and stability story.
-- A realistic interaction on an occluded/off-screen element **polls and fails** like a real one — the feature, but it makes these specs timing-sensitive. Bump `rb.WithTimeout(d)` for a slow scroll/settle; don't drop to `Immediate()`.
+- Prefer the fast track for the bulk of a suite. A suite specifically testing real-input behavior may legitimately use realistic mode throughout.
+- A realistic interaction scrolls an off-screen target into view; a target that remains occluded or non-actionable **polls and fails** — the feature, but it makes these specs timing-sensitive. Bump `rb.WithTimeout(d)` for a slow scroll/settle; don't drop to `Immediate()`.
 - `DragTo` drives **pointer-based** DnD (@dnd-kit, Sortable), **not** native HTML5 `draggable` (a separate drag-event model).

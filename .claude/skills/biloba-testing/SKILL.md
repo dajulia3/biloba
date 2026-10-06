@@ -1,6 +1,6 @@
 ---
 name: biloba-testing
-description: How to write and run Biloba's own Ginkgo test suite. Use when adding or modifying specs in this repo, asserting that a Biloba call should fail the test, working with the fixture server, or running the suite. Covers the run command, the failure-capturing gt/bilobaT harness, ExpectFailures, fixtures, and spec structure.
+description: Write or run Biloba’s own Ginkgo specs, including the failure-capturing harness, fixtures, and Chrome test lanes.
 ---
 
 # Testing Biloba
@@ -13,13 +13,15 @@ The `Makefile` wraps the canonical invocations — prefer these:
 
 | Command | What it runs | When |
 |---|---|---|
-| `make test` | headless (chrome-headless-shell), parallel + randomized | your default, every change |
+| `make test` | headless (chrome-headless-shell), parallel + randomized | default validation for implementation changes; use focused specs while iterating |
 | `make test-all` | `make test`, then the same suite in full ("new") headless google-chrome (`BILOBA_TEST_HIGH_FIDELITY=true`) | before changes touching tab/Chrome lifecycle — both lanes are what CI runs |
 | `make stress-test` | 6 procs under moderate CPU/IO load (`stress`), 41 repeats, generous total budget | **only periodically, or when you suspect a change might be flaky** — it's slow and needs `stress` (`brew install stress`) |
 
 Under the hood `make test` is just `ginkgo -r -p --randomize-all`. `-p` (parallel) is the realistic mode — Biloba is built for it (one shared Chrome, one isolated root tab per process); `--randomize-all` enforces spec independence.
 
 `make stress-test` exists because Biloba's flakes are timing/concurrency races in the Chrome DevTools target lifecycle that a single clean run won't surface. It runs `ginkgo -procs=6 --repeat 40 --timeout=1500s --poll-progress-after=45s` under background `stress` load: the load perturbs scheduling so races show up, `--poll-progress-after` dumps the wedged goroutine stack within 45s of any hang, and the generous `--timeout` is a *total* budget across all repeats (so size it above repeats × per-run, or a healthy run looks like a timeout). Don't run it on every change — reach for it after touching tab create/close, `AllTabs`, `ConnectToChrome`, or anything in the chromedp bridge.
+
+Documentation/skill-only edits need frontmatter, link, and consistency checks rather than a browser run.
 
 To focus while debugging, run in serial and optionally non-headless/interactive:
 
@@ -108,7 +110,7 @@ The smell: **an assertion on a timeout, a status, an empty tally, or an error pa
 
 The fix is a **second spec from the opposite direction**, not a bigger assertion on the first: one spec proves the deadline is honoured, another proves the handler fires. Widening the original would only have made a one-sided spec longer.
 
-Watch for it wherever a spec composes a *view* (`Realistic()`, `WithTimeout(d)`, `Immediate()`, `ViewportOnly()`) with a method that registers or mutates state — that composition has two halves by construction.
+Watch for it wherever a spec composes a *view* (`Realistic()`, `WithTimeout(d)`, `Immediate()`) with a method that registers or mutates state — that composition has two halves by construction.
 
 For **matchers**, you usually don't go through `gt` — call `Match` directly and inspect the returned error:
 ```go
@@ -141,7 +143,7 @@ m := b.EachBeVisible()
 - **Capturing a value you also assert on:** `Eventually(sel).Should(b.HaveAttribute("data-id", Not(BeEmpty())).Capture(&id))` — one read. Asserting and *then* calling the getter is two reads of a page that may have changed in between. Under `ShouldNot` nothing is captured (by design), so a spec that needs the value uses a `Should`.
 - **Dismissing a popover/menu (click-away):** `b.Click(sel, b.At(x, y))` is the blessed idiom — target a background region and offset onto the backdrop: `b.Click("body", b.At(5, 5))`.
 
-**Never put a side effect in an `Eventually`/`Consistently` body** — the body re-runs every poll, so a `b.Click` inside it rapid-fires clicks before state settles (a real footgun for cycling controls like a 3-way toggle). The body must be idempotent. To drive a cycling control to a target state, click *once* then wait for the change before reconsidering:
+**Repeated actions in an `Eventually`/`Consistently` body must be idempotent.** A toggle click can rapid-fire before state settles; an intentional set-and-confirm loop can safely repeat `b.Immediate().SetValue`. To drive a cycling control to a target state, click *once* then wait for the change before reconsidering:
 
 ```go
 for b.GetAttribute("html", "data-theme") != "dark" {

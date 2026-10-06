@@ -1,6 +1,6 @@
 ---
 name: api
-description: One-line reference for every Biloba method and matcher, grouped by area — selectors/locators, lifecycle, poll-config (WithTimeout/WithPolling/WithContext/Immediate), capturing a matcher's observed value (.Capture), navigation (GetLocation/GetTitle), cookies/storage, tabs, DOM existence/visibility/contents/properties/forms, clicking and interactions (incl. drag/scroll/tap/modifiers/text-selection), realistic mode, keyboard, uploads, element JS, dialogs, downloads, arbitrary JS (incl. the GetJSValue app-state barrier), network stubbing/aborting/modifying/observing/holding (HoldResponse + Limit/ReleaseNext), screenshots/outline/window, and visual regression (HaveScreenshot + Mask/Tolerance/ChannelTolerance/Animated/InColorSchemes). Use to look up the exact method or matcher name and shape. Methods marked (dual) poll until they succeed when fully applied and return a pollable matcher when under-applied.
+description: Look up the exact name, arguments, and polling behavior of a Biloba method or matcher.
 ---
 
 # Biloba API reference

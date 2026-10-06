@@ -13,13 +13,13 @@ The Biloba repo doubles as the marketplace:
 
 ## What you get
 
-All skills are namespaced under `biloba:` and activate when you're working in a Go repo with a Biloba/Ginkgo suite.
+All skills are namespaced under `biloba:` and apply to their listed tasks in a Go repo with a Biloba/Ginkgo suite. Larger skills link to supporting references; read only the reference needed for the current task.
 
 | Skill | Use it when |
 |---|---|
-| `biloba:overview` | You want the mental model — the three principles and how they change the way you write specs (read me first). |
+| `biloba:overview` | You want the mental model — the three principles and how they change the way you write specs (use when adopting Biloba). |
 | `biloba:setup` | You're wiring Biloba into a project: `go get`, the bootstrap file, installing `chrome-headless-shell`, the bootstrap variations. |
-| `biloba:write-tests` | You're authoring specs: the dual immediate/matcher API, selecting elements, hermetic tests with stubs, multi-tab flows. |
+| `biloba:write-tests` | You're authoring specs: the dual immediate/matcher API, selecting elements, network control when needed, multi-tab flows. |
 | `biloba:realistic-mode` | You need realistic interactions — occlusion, CSS `:hover`, drag, scroll, touch — via the `b.Realistic()` track. |
 | `biloba:visual-assertions` | You're asserting that something still *looks* right — `b.HaveScreenshot` against a committed baseline, masking, tolerance, and reading a failed comparison. |
 | `biloba:xpath` | You're building an XPath selector with Biloba's `b.XPath()` DSL. |
